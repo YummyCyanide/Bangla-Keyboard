@@ -9,8 +9,6 @@ A small, fast **Bijoy-style Bangla typing engine for Windows**. It sits in a thi
 ---
 
 ## Contents
-
-- [What's New](#whats-new)
 - [Download](#download)
 - [Features](#features)
 - [Included Tools](#included-tools-tools-folder)
@@ -21,19 +19,6 @@ A small, fast **Bijoy-style Bangla typing engine for Windows**. It sits in a thi
 - [License](#license)
 - [Disclaimer](#disclaimer)
 - [Credits](#credits)
-
----
-
-## What's New
-
-- **Pupo Encrypter (new tool).** Locks and unlocks layouts (`.xml` <-> `.bkl`) and encoding tables (`.txt` <-> `.een`) so nobody changes them by accident. Add files or drag and drop many at once; the tool recognises layouts and encodings automatically.
-- **`.bkl` locked layouts.** Bangla Keyboard can now read `.bkl` layout files as well as `.xml`. If a `.bkl` and a `.xml` share a name, the `.bkl` is used.
-- **`.een` encoding files.** Text Converter and Docs Converter now read `.een` files as well as `.txt` from `Tools\Encodings`.
-- **Built-in button icons.** The two extra bar buttons now offer ready-made icons grouped by tool (Docs, Text, Layout, Note). You can still add your own pictures in `Skins\Button Icons`.
-- **New app icon** for Pupo Encrypter in the `_icon` folder.
-- **Updated documentation**, including system requirements for Pupo Encrypter.
-
-> **Note:** `.bkl` and `.een` only protect files from being read or changed by accident. This is light scrambling, **not real encryption**.
 
 ---
 
