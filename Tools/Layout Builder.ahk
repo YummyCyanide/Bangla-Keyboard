@@ -1,5 +1,5 @@
 ﻿; ===========================================================================
-;  Bangla Layout Builder - make and edit keyboard layouts (.zxe / .xml) for Bangla Keyboard
+;  Bangla Layout Builder - make and edit keyboard layouts (.xml) for Bangla Keyboard
 ;  Needs AutoHotkey v2 (portable exe is fine).
 ;  The files it writes are the same format as the ones in Bangla Keyboard's Layouts folder.
 ; ===========================================================================
@@ -250,6 +250,7 @@ class LB {
     static ddH := 24
     static maxed := false
     static fixing := false
+    static starting := false       ; true while the window is built hidden, so it only appears once, at its final size and place
 }
 
 ; ---- the plain English keyboard: what an unchanged key types -------------------
@@ -604,11 +605,11 @@ SaveLayout(saveAs := false) {
     }
     path := LB.file
     if (saveAs || path = "") {
-        path := FileSelect("S16", LB.layoutsDir . "\" . SafeName(name) . ".zxe", "Save layout (.zxe is the default; end the name with .xml to save a plain .xml)", "Layout (*.zxe; *.xml)")
+        path := FileSelect("S16", LB.layoutsDir . "\" . SafeName(name) . ".xml", "Save layout (.xml)", "Layout (*.xml)")
         if (path = "")
             return false
-        if !RegExMatch(path, "i)\.(zxe|xml)$")
-            path .= ".zxe"
+        if !RegExMatch(path, "i)\.xml$")
+            path .= ".xml"
     }
     if !CheckBeforeSave(name, path)
         return false
@@ -737,7 +738,7 @@ NewLayout(*) {
 OpenLayout(*) {
     if !ConfirmDiscard()
         return
-    p := FileSelect(3, LB.layoutsDir . "\", "Open layout", "Layout (*.zxe; *.xml)")
+    p := FileSelect(3, LB.layoutsDir . "\", "Open layout", "Layout (*.xml)")
     if (p = "")
         return
     OpenPath(p)
@@ -1382,7 +1383,7 @@ CheckBeforeSave(name, path) {
     SplitPath(path, , &folder)
     same := []
     Loop Files folder . "\*.*" {
-        if !RegExMatch(A_LoopFileName, "i)\.(zxe|xml)$")
+        if !RegExMatch(A_LoopFileName, "i)\.xml$")
             continue
         if (StrLower(A_LoopFileFullPath) = StrLower(path))
             continue
@@ -1902,7 +1903,7 @@ SaveChartHtml(*) {
 ; ---- drag and drop a layout file onto the window -----------------------------------------------
 OnDropFiles(gObj, ctrlObj, files, x, y) {
     for f in files {
-        if RegExMatch(f, "i)\.(zxe|xml)$") {
+        if RegExMatch(f, "i)\.xml$") {
             SetTimer(OpenDropped.Bind(f), -10)         ; let Explorer finish the drop first
             return
         }
@@ -1916,7 +1917,7 @@ OpenDropped(f) {
 }
 
 DropHint() {
-    MsgBox("Drop a layout file (.zxe or .xml) here to open it.", "Bangla Layout Builder", "0x40 Owner" . LB.g.Hwnd)
+    MsgBox("Drop a layout file (.xml) here to open it.", "Bangla Layout Builder", "0x40 Owner" . LB.g.Hwnd)
 }
 
 GuideTextEn() {
@@ -2124,7 +2125,7 @@ PART 8  -  SAVING AND USING YOUR LAYOUT
    Layouts folder...   chooses the folder this program uses. You can point it straight at the Layouts folder of Bangla Keyboard.
    Show folder  opens that folder in Windows
 To use your layout: copy the saved file into the Layouts folder of Bangla Keyboard, then restart Bangla Keyboard.
-Save As gives the file the .zxe extension by default. Inside, it is the same XML as a .xml file. To save a plain .xml file, end the file name with .xml in the Save As box. Open and drag-and-drop accept both.
+Save As ফাইলটি .xml হিসেবে সেভ করে। Open এবং ড্র্যাগ-অ্যান্ড-ড্রপ .xml ফাইল খুলতে পারে।
 
 
 =============================================================
@@ -2407,7 +2408,7 @@ XML ফাইলটি তবুও UTF-8 হিসেবেই সেভ হয
    Layouts folder...   এই প্রোগ্রাম কোন ফোল্ডার ব্যবহার করবে তা ঠিক করে। চাইলে সরাসরি বাংলা কীবোর্ডের Layouts ফোল্ডার দেখিয়ে দিতে পারেন।
    Show folder  ওই ফোল্ডারটি Windows-এ খোলে
 লেআউট ব্যবহার করতে: সেভ করা ফাইলটি বাংলা কীবোর্ডের Layouts ফোল্ডারে কপি করুন, তারপর বাংলা কীবোর্ড আবার চালু করুন।
-Save As ডিফল্টভাবে ফাইলকে .zxe এক্সটেনশন দেয়; ভেতরের লেখা .xml ফাইলের মতোই XML। সাধারণ .xml ফাইল সেভ করতে Save As বক্সে ফাইলের নামের শেষে .xml লিখুন। Open ও ড্র্যাগ-ড্রপ দুটোই মেনে নেয়।
+Save As ফাইলটি .xml হিসেবে সেভ করে। Open এবং ড্র্যাগ-অ্যান্ড-ড্রপ .xml ফাইল খুলতে পারে।
 
 
 =============================================================
@@ -2724,7 +2725,7 @@ Relayout() {
     needH := (M + Px(26) + GAP + Px(24) + GAP + Px(24) + GAP) + usedN + 2 * GAP + Px(124) + 2 * P + pd0[2] + pd0[4] + M
     if (!LB.maxed && !LB.fixing && Abs(H - needH) > 1) {
         LB.fixing := true
-        try g.Show("NA w" . W . " h" . needH)
+        try g.Show((LB.starting ? "Hide " : "NA ") . "w" . W . " h" . needH)
         Relayout()
         LB.fixing := false
         return
@@ -2823,6 +2824,52 @@ Relayout() {
     } finally {
         SendMessage(0x000B, 1, 0, g.Hwnd)
         DllCall("RedrawWindow", "ptr", g.Hwnd, "ptr", 0, "ptr", 0, "uint", 0x185)
+    }
+}
+
+; ---------------------------------------------------------------------------
+;  Hover hints: rest the mouse on a button, box or key and a short tooltip says what it does.
+; ---------------------------------------------------------------------------
+Hint(ctl, text) {
+    if IsObject(ctl)
+        Hints[ctl.Hwnd] := text
+}
+
+HintPoll() {
+    static last := 0, since := 0, shown := false
+    txt := ""
+    MouseGetPos(, , &win, &ctl, 2)
+    if (IsObject(LB.g) && win = LB.g.Hwnd) {
+        h := IsInteger(ctl) ? ctl : 0                     ; empty when the mouse is not over a control
+        Loop 3 {
+            if (!h || h = win)
+                break
+            if Hints.Has(h) {
+                txt := Hints[h]
+                break
+            }
+            h := DllCall("GetParent", "Ptr", h, "Ptr") || 0
+        }
+        if (h != last) {
+            last := h
+            since := A_TickCount
+            if shown {
+                ToolTip(, , , 19)
+                shown := false
+            }
+        }
+    } else
+        last := 0
+    if (txt = "") {
+        if shown {
+            ToolTip(, , , 19)
+            shown := false
+        }
+        return
+    }
+    if (!shown && A_TickCount - since >= 600) {
+        ToolTip(txt, , , 19)
+        shown := true
     }
 }
 
@@ -3028,12 +3075,67 @@ BuildGui() {
     ed2.Value := StrReplace(GuideTextBn(), "`n", "`r`n")
     ui["guideBn"] := ed2
 
+    ; ---------- hover hints (always on): rest the mouse on anything to see what it does ----------
+    tp := ["Start a new, empty layout.", "Open a saved layout file (.xml).", "Save the layout to its file. (Ctrl+S)"
+        , "Save the layout under a new name or place.", "Choose the folder where your layouts are kept.", "Open the layouts folder in Windows Explorer."]
+    for k, t in tp
+        Hint(top[k][1], t)
+    Hint(LB.btnUndo, "Undo the last change. (Ctrl+Z)")
+    Hint(LB.btnRedo, "Redo the change you undid. (Ctrl+Y)")
+    Hint(LB.ddType, "What kind of layout this is. Auto-detect is right for most layouts.")
+    Hint(bKm, "Make the letters on the keys smaller.")
+    Hint(bKp, "Make the letters on the keys bigger.")
+    Hint(bKr, "Back to the normal key text size.")
+    Hint(LB.edName, "The name of this layout, as shown in the keyboard's list.")
+    Hint(LB.cbIcon, "The icon of this layout.`nPick a name, or type the name of a picture in the Icons folder.")
+    Hint(LB.hkSc, "Key combination that switches the keyboard to this layout.")
+    Hint(btnClear, "Remove the shortcut.")
+    Hint(LB.tab, "Keys: set what each key types.`nJoining rules: letters that combine.`nTry your layout: test typing.`nLayout Viewer: print or save the chart.")
+    for id, p in LB.kp {
+        for c in [p.b, p.e, p.s, p.n]
+            Hint(c, "Click a key to change what it types.")
+    }
+    Hint(LB.edN, "What this key types on its own (no Shift).")
+    Hint(LB.ddN, "A special behaviour for this key when typed on its own.")
+    Hint(LB.edS, "What this key types with Shift.")
+    Hint(LB.ddS, "A special behaviour for this key when typed with Shift.")
+    Hint(b1, "Insert a hasanta at the cursor of the last box you used.")
+    Hint(b2, "Insert a ZWNJ at the cursor: it stops two letters from joining.")
+    Hint(b3, "Insert a ZWJ at the cursor: it makes two letters join.")
+    Hint(b4, "Put this key back to its plain English letter.")
+    Hint(b5, "Copy this key's settings.")
+    Hint(b6, "Paste the copied settings onto this key.")
+    Hint(LB.edFind, "Type here to find a joining rule in the list.")
+    Hint(LB.lv, "Your joining rules. Click one to edit it below.")
+    Hint(LB.edSeq, "The letters as they are typed, in order.")
+    Hint(LB.edOut, "What those letters turn into.")
+    Hint(j1, "Save the rule above: adds it, or updates the selected one.")
+    Hint(j2, "Delete the selected rule.")
+    Hint(j3, "Load joining rules from a file.")
+    Hint(j4, "Save the joining rules to a file.")
+    Hint(j5, "Add the usual vowel-sign rules.")
+    Hint(j6, "Delete every joining rule.")
+    Hint(LB.edIn, "Type English letters here to test the layout as it is now.")
+    Hint(ui["splitTry"], "Drag up or down to resize the two boxes.")
+    Hint(LB.cbFont, "The font used to show the result. Pick one or type its name.")
+    Hint(btnFontDef, "Use the automatic font.")
+    Hint(LB.ddSize, "The size of the result text.")
+    Hint(LB.edRes, "What your layout types for the letters on the left.")
+    Hint(ui["btnPrint"], "Open the chart in your web browser, ready to print.")
+    Hint(ui["btnHtml"], "Save the chart as a web page (.html) you can share.")
+    Hint(ui["btnImg"], "Save the chart as a picture.")
+    Hint(ed, "The guide in English. Scroll to read it.")
+    Hint(ed2, "The guide in Bangla. Scroll to read it.")
+
     tab.UseTab()
     g.OnEvent("Close", AppClose)
     LB.ready := true
-    g.Show("Center w" . Px(820) . " h" . Px(600))
-    Relayout()
-    CenterWin(g)                                       ; Relayout may change the height, so centre again
+    LB.starting := true
+    g.Show("Hide w" . Px(820) . " h" . Px(600))        ; not visible yet
+    Relayout()                                         ; settle the final height first
+    CenterWin(g)                                       ; then centre the finished size
+    LB.starting := false
+    g.Show()                                           ; appears once, already in the middle
 }
 
 ; ---------------------------------------------------------------------------
@@ -3054,6 +3156,8 @@ try {
     if (FileExist(oldIni) && !FileExist(LB.ini))
         FileCopy(oldIni, LB.ini)
 }
+global Hints := Map()
+SetTimer(HintPoll, 120)
 LoadSettings()
 ResetModel()
 BuildGui()

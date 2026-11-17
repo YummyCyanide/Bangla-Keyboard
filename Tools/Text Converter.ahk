@@ -2,9 +2,9 @@
 ;  Bangla Text Converter  -  ANSI (Bijoy) <-> Unicode
 ;  Two boxes: type or paste in one, then press "To ANSI" / "To Unicode" to convert.
 ;  Needs AutoHotkey v2. Mapping tables live in the Encodings folder as *.txt
-;  (plain) or *.zxn (same text, lightly scrambled for distribution).
+;  (plain) or *.een (same text, lightly scrambled for distribution).
 ;  Format: one "ansi<TAB>unicode" pair per line, lines starting with # are
-;  comments. Use Tools\ZxnConvert.ahk to turn a .txt into a .zxn and back.
+;  comments. Use Tools\Pupo Encrypter.ahk to turn a .txt into a .een.
 ; ===========================================================================
 #Requires AutoHotkey v2.0
 #SingleInstance Force
@@ -36,7 +36,7 @@ class Cv {
     static files := []
     static layout := "H"         ; H = stacked, V = side by side, T = tabs
     static tab := ""
-    static zk := "BanglaConverter"    ; scramble key for .zxn files (see ZxnDecode)
+    static ek := "BanglaConverter"    ; scramble key for .een files (see EenDecode)
     static lastA := ""
     static lastU := ""
     ; draggable divider between the two boxes
@@ -51,7 +51,7 @@ class Cv {
     static sMin := 40            ; smallest allowed box size
     static sGrip := 6            ; divider thickness
     static dragging := false
-    static theme := "S"          ; S = follow Windows, L = light, D = dark
+    static theme := "L"          ; L = light (the default), S = follow Windows, D = dark
     static dark := false
     static bg := "F0F0F0"        ; window colours (RRGGBB), set by CvApplyTheme
     static fg := "000000"
@@ -85,20 +85,26 @@ class Cv {
 ; ---------------------------------------------------------------------------
 ;  Mapping table
 ; ---------------------------------------------------------------------------
-; .zxn = a text mapping file, scrambled byte by byte. Layout: "ZXN" + 0x01, then
-; each byte is (plain XOR key[i]) + (i*31+17), all modulo 256. This is only meant to
-; stop the file being read at a glance; it is not real encryption.
-ZxnDecode(buf) {
-    n := buf.Size - 4
-    if (n < 0 || NumGet(buf, 0, "UChar") != 0x5A || NumGet(buf, 1, "UChar") != 0x58
+; .een = a text mapping file, scrambled byte by byte. Layout: "EEN" + 0x01 + the text length (4 bytes),
+; then each byte is (plain XOR key[i]) + (i*31+17), all modulo 256. This is only meant to stop the
+; file being read at a glance; it is not real encryption. A .een file that holds plain text is read as it is.
+EenDecode(buf) {
+    if (buf.Size = 0)
+        return ""
+    if (buf.Size < 8 || NumGet(buf, 0, "UChar") != 0x45 || NumGet(buf, 1, "UChar") != 0x45
         || NumGet(buf, 2, "UChar") != 0x4E || NumGet(buf, 3, "UChar") != 1)
-        throw Error("Not a valid .zxn file.")
+        return StrGet(buf, buf.Size, "UTF-8")
+    n := NumGet(buf, 4, "UInt")
+    if (n > buf.Size - 8)
+        throw Error("This .een file is damaged (it ends too early).")
+    if (n = 0)
+        return ""
     out := Buffer(n, 0)
-    kl := StrLen(Cv.zk)
+    kl := StrLen(Cv.ek)
     Loop n {
         i := A_Index - 1
-        e := NumGet(buf, 4 + i, "UChar")
-        d := ((e - (i * 31 + 17)) & 0xFF) ^ Ord(SubStr(Cv.zk, Mod(i, kl) + 1, 1))
+        e := NumGet(buf, 8 + i, "UChar")
+        d := ((e - (i * 31 + 17)) & 0xFF) ^ Ord(SubStr(Cv.ek, Mod(i, kl) + 1, 1))
         NumPut("UChar", d, out, i)
     }
     return StrGet(out, n, "UTF-8")
@@ -106,8 +112,8 @@ ZxnDecode(buf) {
 
 LoadMapping(path) {
     SplitPath(path, , , &ext)
-    if (StrLower(ext) = "zxn")
-        txt := ZxnDecode(FileRead(path, "RAW"))
+    if (StrLower(ext) = "een")
+        txt := EenDecode(FileRead(path, "RAW"))
     else
         txt := FileRead(path, "UTF-8")
     if (SubStr(txt, 1, 1) == Chr(0xFEFF))
@@ -1058,13 +1064,13 @@ CvSubProc(hWnd, uMsg, wParam, lParam, uIdSubclass, dwRefData) {
     return DllCall("comctl32\DefSubclassProc", "Ptr", hWnd, "UInt", uMsg, "UPtr", wParam, "Ptr", lParam, "Ptr")
 }
 
-; Mapping files in Encodings: *.txt and *.zxn. If both exist under the same name,
+; Mapping files in Encodings: *.txt and *.een. If both exist under the same name,
 ; the .txt is used.
 CvFindMaps() {
     list := []
     seen := Map()
     seen.CaseSense := "Off"
-    for ext in ["txt", "zxn"] {
+    for ext in ["txt", "een"] {
         Loop Files, A_ScriptDir . "\Encodings\*." . ext {
             SplitPath(A_LoopFileFullPath, , , &e, &nm)
             if (StrLower(e) != ext || seen.Has(nm))     ; the pattern can also match longer extensions
@@ -1079,7 +1085,7 @@ CvFindMaps() {
 CvStart() {
     Cv.files := CvFindMaps()
     if (Cv.files.Length = 0) {
-        MsgBox("No mapping file found.`nPut a mapping file (.txt or .zxn) in the Encodings folder.", "Bangla Text Converter", 0x10)
+        MsgBox("No mapping file found.`nPut a mapping file (.txt or .een) in the Encodings folder.", "Bangla Text Converter", 0x10)
         ExitApp()
     }
     names := []

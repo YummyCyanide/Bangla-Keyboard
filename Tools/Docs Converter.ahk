@@ -11,10 +11,12 @@
 ;  Everything with text is read: body text, tables, text boxes / shapes / groups, headers,
 ;  footers, footnotes, comments, SmartArt and chart text (slides + notes in PowerPoint).
 ;  Text  : .txt (encoding conversion only, a text file has no fonts)
-;  The original file is never changed: the result is saved as a new file.
-;  Settings are kept in %AppData%\Bangla Keyboard\Docs Converter.dat
+;  The original file is never changed: the result is saved as a new file, in the same format as
+;  the file that was opened (.docx stays .docx, .pptx stays .pptx, .doc stays .doc ...).
+;  Only the window size and the last folders are kept in %AppData%\Bangla Keyboard\Docs Converter.dat
+;  Every newly opened document starts completely fresh (scan options, plan, filters, sort, preview size).
 ;  Needs AutoHotkey v2 and Windows PowerShell (built into Windows 10/11).
-;  Mapping tables are read from the Encodings folder (*.txt / *.zxn), the same
+;  Mapping tables are read from the Encodings folder (*.txt / *.een), the same
 ;  files the Bangla Text Converter uses.
 ; ===========================================================================
 #Requires AutoHotkey v2.0
@@ -25,7 +27,7 @@ ProcessSetPriority("High")         ; big files: use the CPU fully
 ListLines(false)                  ; no line history: the script runs noticeably faster
 
 class K {
-    static zk := "BanglaConverter"     ; scramble key of the .zxn files
+    static ek := "BanglaConverter"     ; scramble key of the .een files
     static HAS := Chr(0x09CD)
     static ZWNJ := Chr(0x200C)
     static ZWJ := Chr(0x200D)
@@ -44,17 +46,26 @@ class K {
 ; ---------------------------------------------------------------------------
 ;  Mapping table (one object per mapping file)
 ; ---------------------------------------------------------------------------
-ZxnDecode(buf) {
-    n := buf.Size - 4
-    if (n < 0 || NumGet(buf, 0, "UChar") != 0x5A || NumGet(buf, 1, "UChar") != 0x58
+; .een = a text mapping file, scrambled byte by byte. Layout: "EEN" + 0x01 + the text length (4 bytes),
+; then each byte is (plain XOR key[i]) + (i*31+17), all modulo 256. This is only meant to stop the
+; file being read at a glance; it is not real encryption. A .een file that holds plain text is read as it is.
+EenDecode(buf) {
+    if (buf.Size = 0)
+        return ""
+    if (buf.Size < 8 || NumGet(buf, 0, "UChar") != 0x45 || NumGet(buf, 1, "UChar") != 0x45
         || NumGet(buf, 2, "UChar") != 0x4E || NumGet(buf, 3, "UChar") != 1)
-        throw Error("Not a valid .zxn file.")
+        return StrGet(buf, buf.Size, "UTF-8")
+    n := NumGet(buf, 4, "UInt")
+    if (n > buf.Size - 8)
+        throw Error("This .een file is damaged (it ends too early).")
+    if (n = 0)
+        return ""
     out := Buffer(n, 0)
-    kl := StrLen(K.zk)
+    kl := StrLen(K.ek)
     Loop n {
         i := A_Index - 1
-        e := NumGet(buf, 4 + i, "UChar")
-        d := ((e - (i * 31 + 17)) & 0xFF) ^ Ord(SubStr(K.zk, Mod(i, kl) + 1, 1))
+        e := NumGet(buf, 8 + i, "UChar")
+        d := ((e - (i * 31 + 17)) & 0xFF) ^ Ord(SubStr(K.ek, Mod(i, kl) + 1, 1))
         NumPut("UChar", d, out, i)
     }
     return StrGet(out, n, "UTF-8")
@@ -64,8 +75,8 @@ class Mapping {
     __New(path) {
         SplitPath(path, , , &ext, &nm)
         this.name := nm
-        if (StrLower(ext) = "zxn")
-            txt := ZxnDecode(FileRead(path, "RAW"))
+        if (StrLower(ext) = "een")
+            txt := EenDecode(FileRead(path, "RAW"))
         else
             txt := FileRead(path, "UTF-8")
         if (SubStr(txt, 1, 1) == Chr(0xFEFF))
@@ -374,16 +385,18 @@ class Cf {
     static scanOpt := Map(), scanIds := ["font", "size"], scanned := false, cbScan := Map()
     static colIds := [], byIds := ["any"], rowKeys := []
     static hdScan := "", btnScan := "", btnScanAll := "", btnScanNone := "", sepS := "", ddBy := ""
-    static lbl2 := "", lbl5 := "", lbl6 := "", btnApplyAll := ""
-    static queue := [], clip := "", busySel := false, progPre := "", nRecall := 0, recall := Map()
+    static ddVal := "", btnClearF := "", colFilter := Map(), valKeys := [], fq := ""
+    static lbl2 := "", lbl5 := "", lbl6 := "", btnApplyAll := "", btnApplySel := ""
+    static queue := [], clip := "", busySel := false, progPre := ""
     static ddAct := "", ddMap := "", ddMap2 := "", cbFont := "", ddSize := "", edSize := ""
     static btnConv := "", edLog := "", sb := ""
     static hdFile := "", sep0 := "", sep5 := "", hdPrev := "", btnPrevDn := "", btnPrevUp := "", lblPrevSz := "", btnPrevReset := ""
     static tabUser := false, prevSize := 11, prevFont := "Segoe UI"
-    static lastOpenDir := "", lastSaveDir := "", defMap := 1, defMap2 := 1, winW := 900, winH := 600
+    static lastOpenDir := "", lastSaveDir := "", defMap := 1, defMap2 := 1, winW := 900, winH := 570
     static partKeys := Map(), curKeys := Map(), prevPending := ""
     static kind := "", outExt := "docx", tmpDoc := "", txtText := "", txtEnc := "", dml := false
     static effCache := Map(), baseCache := Map(), paraKeys := Map(), memo := Map()
+    static colW := Map()
     static pBase := 0, pSpan := 1, phLo := 0, phHi := 100, convT0 := 0, lastPct := -1, lastTxt := ""
     static pb := "", edMax := "", lblMax := ""
     static NSA := "http://schemas.openxmlformats.org/drawingml/2006/main"
@@ -1417,7 +1430,7 @@ CfFindMaps() {
     list := []
     seen := Map()
     seen.CaseSense := "Off"
-    for ext in ["txt", "zxn"] {
+    for ext in ["txt", "een"] {
         Loop Files A_ScriptDir . "\Encodings\*." . ext {
             SplitPath(A_LoopFileFullPath, , , &e, &nm)
             if (StrLower(e) != ext || seen.Has(nm))
@@ -1518,6 +1531,7 @@ CfEnableUI(act) {
     on := (act >= 0)
     Cf.ddAct.Enabled := on
     Cf.btnApplyAll.Enabled := on
+    Cf.btnApplySel.Enabled := on
     Cf.ddMap.Enabled := (act >= 1 && act <= 3)
     Cf.ddMap2.Enabled := (act = 3)
     Cf.lbl2.Text := (act = 3) ? "From encoding" : "ANSI encoding"
@@ -1554,7 +1568,7 @@ CfUIChanged(*) {
     }
     rule.map := Max(1, Cf.ddMap.Value)
     rule.map2 := Max(1, Cf.ddMap2.Value)
-    Cf.defMap := rule.map                           ; remembered as the default for the next fonts / next time
+    Cf.defMap := rule.map                           ; default for the next rows of this document only
     Cf.defMap2 := rule.map2
     rule.font := Trim(Cf.cbFont.Text)
     rule.sizeMode := Max(0, Cf.ddSize.Value - 1)
@@ -1582,78 +1596,6 @@ CfUIChanged(*) {
                 r.sizeVal := rule.sizeVal
         }
         Cf.lv.Modify(row, "Col" . Cf.colIds.Length, CfPlanText(r))
-    }
-}
-
-; ---- remembered plan per source font (saved when a conversion is done, set again by the next scan) ----
-CfLoadRecall() {
-    Cf.recall := Map()
-    Cf.recall.CaseSense := "Off"
-    try sec := IniRead(CfSettingsFile(), "FontRules")
-    catch
-        return
-    Loop Parse sec, "`n", "`r" {
-        p := InStr(A_LoopField, "=")
-        if (p > 1)
-            Cf.recall[SubStr(A_LoopField, 1, p - 1)] := SubStr(A_LoopField, p + 1)
-    }
-}
-
-CfMapIndex(name, def) {
-    for i, v in Cf.mapNames {
-        if (v = name)
-            return i
-    }
-    return def
-}
-
-CfUnpackRule(v) {
-    p := StrSplit(v, "|")
-    if (p.Length < 6 || !IsInteger(p[1]))
-        return ""
-    act := Integer(p[1])
-    if (act < 1 || act > 4)
-        return ""
-    r := CfNewRule()
-    r.act := act
-    r.map := CfMapIndex(p[2], Cf.defMap)
-    r.map2 := CfMapIndex(p[3], Cf.defMap2)
-    r.font := p[4]
-    r.sizeMode := IsInteger(p[5]) ? Min(2, Max(0, Integer(p[5]))) : 0
-    r.sizeVal := IsNumber(p[6]) ? Number(p[6]) : 0
-    return r
-}
-
-CfRememberRules() {
-    if (Cf.kind = "txt")
-        return
-    best := Map()
-    for k, st in Cf.fonts {
-        fn := st["attr"].Get("font", "")
-        if (fn = "" || fn = "(default)" || fn = "(plain text)")
-            continue
-        r := Cf.rules.Get(k, "")
-        if !IsObject(r)
-            continue
-        cur := best.Get(fn, "")
-        if (!IsObject(cur) || (r.act != 0 && (cur[1].act = 0 || st["chars"] > cur[2])))
-            best[fn] := [r, st["chars"]]
-    }
-    try {
-        f := CfSettingsFile()
-        for fn, b in best {
-            key := Trim(StrReplace(StrReplace(fn, "=", "_"), "`n", " "))
-            r := b[1]
-            if (key = "")
-                continue
-            if (r.act = 0) {
-                try IniDelete(f, "FontRules", key)
-                continue
-            }
-            m1 := (r.map >= 1 && r.map <= Cf.mapNames.Length) ? Cf.mapNames[r.map] : ""
-            m2 := (r.map2 >= 1 && r.map2 <= Cf.mapNames.Length) ? Cf.mapNames[r.map2] : ""
-            IniWrite(r.act . "|" . m1 . "|" . m2 . "|" . r.font . "|" . r.sizeMode . "|" . r.sizeVal, f, "FontRules", key)
-        }
     }
 }
 
@@ -1785,6 +1727,23 @@ CfApplyAllShown(srcKey, *) {
     Cf.sb.SetText("  Settings applied to all " . Cf.rowKeys.Length . " rows shown.")
 }
 
+; the settings now shown go to every selected row of the list
+CfApplySelected(*) {
+    if (Cf.curName = "" || !Cf.rules.Has(Cf.curName))
+        return
+    src := Cf.rules[Cf.curName]
+    n := 0
+    for row in CfSelectedRows() {
+        key := Cf.rowKeys[row]
+        if (key != Cf.curName) {
+            CfCopyRule(Cf.rules[key], src)
+            n += 1
+        }
+    }
+    CfRefreshPlans()
+    Cf.sb.SetText("  Settings applied to " . CfSelectedRows().Length . " selected row(s).")
+}
+
 CfListMenu(lv, item, isRight, x, y) {
     if (Cf.rowKeys.Length = 0)
         return
@@ -1829,10 +1788,53 @@ CfListMenu(lv, item, isRight, x, y) {
 CfTipBox(ctrls) {
     l := 99999, t := 99999, r := 0, b := 0
     for c in ctrls {
+        if !c.Visible                                   ; a hidden control gives no tip
+            continue
         c.GetPos(&x, &y, &w, &h)
         l := Min(l, x), t := Min(t, y), r := Max(r, x + w), b := Max(b, y + h)
     }
     return [l, t, r, b]
+}
+
+; hover tips of the window: [controls the tip covers, text]. Always on; short and simple on purpose.
+CfTipAreas() {
+    scan := []
+    for k, c in Cf.cbScan
+        scan.Push(c)
+    tabTip := ["Log: what the program did, step by step."
+        , "Preview: a sample of the text that uses the selected row."
+        , "Help: how to use this window."]
+    return [[[Cf.hdSize, Cf.ddSize, Cf.edSize]
+            , "Size in points.`nChange by: adds to the current size. Negative = smaller, e.g. -2.`nSet to: uses this exact size."]
+        , [[Cf.btnApplySel], "Copy the settings now shown (action, encoding, font, size) to every selected row."]
+        , [[Cf.btnApplyAll], "Copy the settings now shown (action, encoding, font, size) to every row the list shows.`nThe filter decides which rows those are."]
+        , [[Cf.hdFile, Cf.btnOpen], "Open a Word, PowerPoint or text file.`nYou can also drop files on this window."]
+        , [[Cf.btnRemove], "Close the open document and clear the list."]
+        , [[Cf.hdScan], "Choose what to look at when scanning."]
+        , [[Cf.btnScanAll], "Tick every scan option."]
+        , [[Cf.btnScanNone], "Untick every scan option."]
+        , [scan, "Tick what to look at when scanning.`nEach ticked item becomes a column you can filter by."]
+        , [[Cf.btnScan], "Scan the document and list the fonts found."]
+        , [[Cf.edFind], "Type here to show only the rows that contain it."]
+        , [[Cf.ddBy], "Pick a column to filter by.`nA second box then lists every value found in that column; a * marks a column that is filtered."]
+        , [[Cf.ddVal], "Show only the rows whose chosen column has this value.`nAll columns stay visible. Values come from the scanned data that the other filters still show."]
+        , [[Cf.btnClearF], "Remove every filter and show all rows again."]
+        , [[Cf.ddType], "Show only rows of one kind of text."]
+        , [[Cf.lblMin, Cf.edMin], "Hide rows with fewer characters than this."]
+        , [[Cf.lblMax, Cf.edMax], "Hide rows with more characters than this. Empty = no limit."]
+        , [[Cf.lblCount], "Rows shown / rows found."]
+        , [[Cf.lv], "One row per font found. Select rows, then set what to do on the right.`nRight-click a row for more."]
+        , [[Cf.split], "Drag up or down to resize the list and the boxes below."]
+        , [[Cf.edLog, Cf.edPrev, Cf.edHelp], tabTip[Max(1, Min(3, Cf.tab.Value))]]
+        , [[Cf.hdAct, Cf.ddAct], "What to do with the selected rows.`nKeep as is leaves them unchanged."]
+        , [[Cf.hdEnc, Cf.lbl2, Cf.ddMap], "The encoding the text is written in now."]
+        , [[Cf.lbl6, Cf.ddMap2], "The encoding to turn the text into."]
+        , [[Cf.hdFont, Cf.cbFont], "The font for the converted text.`nPick one or type its name."]
+        , [[Cf.hdPrev, Cf.lblPrevSz], "Size of the text in the Preview tab."]
+        , [[Cf.btnPrevDn], "Smaller preview text."]
+        , [[Cf.btnPrevUp], "Bigger preview text."]
+        , [[Cf.btnPrevReset], "Back to the normal preview size."]
+        , [[Cf.btnConv], "Convert using the plan set on each row and save a new file.`nYour original file is never changed."]]
 }
 
 CfTipTick() {
@@ -1848,9 +1850,7 @@ CfTipTick() {
             DllCall("ScreenToClient", "Ptr", Cf.gui.Hwnd, "Ptr", pt)
             mx := NumGet(pt, 0, "Int")
             my := NumGet(pt, 4, "Int")
-            areas := [[[Cf.hdSize, Cf.ddSize, Cf.edSize, Cf.lbl5]
-                    , "Size in points.`nChange by: adds to the current size. Negative = smaller, e.g. -2.`nSet to: uses this exact size."]
-                , [[Cf.btnApplyAll], "Copy the settings now shown (action, encoding, font, size) to every row the list shows.`nThe filter decides which rows those are."]]
+            areas := CfTipAreas()
             for i, a in areas {
                 bx := CfTipBox(a[1])
                 if (mx >= bx[1] && mx < bx[3] && my >= bx[2] && my < bx[4]) {
@@ -1997,6 +1997,7 @@ CfRemove(*) {
     Cf.txtText := ""
     Cf.paraKeys := Map()
     CfProgressReset()
+    CfNewDocDefaults()
     CfClearResults()
     Cf.edFile.Text := "No document open"
     Cf.btnRemove.Enabled := false
@@ -2006,6 +2007,32 @@ CfRemove(*) {
     Cf.tab.Choose(1)
     CfLog("Removed: " . old)
     Cf.sb.SetText("  Open a Word, PowerPoint or text file (or drop one or more files on this window).")
+}
+
+; a document was opened or removed: every setting goes back to its start value
+CfNewDocDefaults() {
+    for dim in CfDims {
+        if Cf.cbScan.Has(dim[1])
+            Cf.cbScan[dim[1]].Value := (dim[1] = "font" || dim[1] = "size") ? 1 : 0
+    }
+    Cf.scanIds := ["font", "size"]
+    Cf.sortCol := "chars"
+    Cf.sortDesc := true
+    Cf.prevSize := 11
+    Cf.prevFont := "Segoe UI"
+    CfApplyPreviewFont()
+}
+
+; right panel back to its start values (no old font / encoding / size is carried over)
+CfResetPanel() {
+    Cf.busyUI := true
+    Cf.ddAct.Choose(1)
+    Cf.ddMap.Choose(1)
+    Cf.ddMap2.Choose(Cf.mapFiles.Length > 1 ? 2 : 1)
+    Cf.cbFont.Text := ""
+    Cf.ddSize.Choose(1)
+    Cf.edSize.Value := "0"
+    Cf.busyUI := false
 }
 
 ; empty list, rules and preview (a file was opened, removed or scanned again)
@@ -2022,6 +2049,25 @@ CfClearResults() {
     Cf.edPrev.Value := ""
     Cf.prevKey := ""
     Cf.lblCount.Text := ""
+    Cf.clip := ""                                       ; copied settings, encodings: back to the start values
+    Cf.defMap := 1
+    Cf.defMap2 := (Cf.mapFiles.Length > 1 ? 2 : 1)
+    CfResetPanel()
+    Cf.colFilter := Map()
+    Cf.colFilter.CaseSense := "Off"
+    Cf.valKeys := []
+    Cf.edFind.Value := ""
+    Cf.ddType.Choose(1)
+    Cf.edMin.Value := "0"
+    Cf.edMax.Value := ""
+    Cf.ddBy.Delete()
+    Cf.ddBy.Add(["Any column"])
+    Cf.ddBy.Choose(1)
+    Cf.ddVal.Delete()
+    Cf.ddVal.Add(["(pick a column first)"])
+    Cf.ddVal.Choose(1)
+    Cf.ddVal.Enabled := false
+    Cf.btnClearF.Enabled := false
     CfEnableUI(-1)
 }
 
@@ -2108,14 +2154,17 @@ CfBuildColumns() {
         Cf.colIds.Push(t[1])
         heads.Push(t[2])
     }
+    Cf.colW := Map()
     for i, hd in heads {
         Cf.lv.InsertCol(i, "", hd)
-        Cf.lv.ModifyCol(i, widths[Cf.colIds[i]])
+        Cf.colW[i] := widths[Cf.colIds[i]]
+        Cf.lv.ModifyCol(i, Cf.colW[i])
     }
     Cf.lv.Opt("+Redraw")
     Cf.ddBy.Delete()
     Cf.ddBy.Add(names)
     Cf.ddBy.Choose(1)
+    CfApplyColView()
     ok := false
     for id in Cf.colIds {
         if (id = Cf.sortCol)
@@ -2127,30 +2176,179 @@ CfBuildColumns() {
     }
 }
 
+; All columns always stay visible; the filter boxes only decide which rows are listed.
+CfApplyColView() {
+    Cf.lv.Opt("-Redraw")
+    for i, id in Cf.colIds
+        Cf.lv.ModifyCol(i, Cf.colW[i])
+    Cf.lv.Opt("+Redraw")
+}
+
+CfByChanged(*) {
+    CfRefreshList()
+}
+
+; the value drop-down: pick one value of the chosen column; every other column's rows are filtered by it too
+CfValChanged(*) {
+    by := Cf.byIds[Max(1, Min(Cf.byIds.Length, Cf.ddBy.Value))]
+    if (by = "any")
+        return
+    idx := Cf.ddVal.Value
+    if (idx <= 1 || idx > Cf.valKeys.Length)
+        Cf.colFilter.Delete(by)
+    else
+        Cf.colFilter[by] := Cf.valKeys[idx]
+    CfRefreshList()
+}
+
+CfClearFilters(*) {
+    Cf.colFilter := Map()
+    Cf.colFilter.CaseSense := "Off"
+    Cf.edFind.Value := ""
+    Cf.ddType.Choose(1)
+    Cf.edMin.Value := "0"
+    Cf.edMax.Value := ""
+    Cf.ddBy.Choose(1)
+    CfRefreshList()
+}
+
+; read the filter boxes once per refresh
+CfReadFilter() {
+    mn := Trim(Cf.edMin.Text)
+    mx := Trim(Cf.edMax.Text)
+    return {q: Trim(Cf.edFind.Text), tsel: Max(1, Cf.ddType.Value)
+        , minc: IsInteger(mn) ? Integer(mn) : 0
+        , maxc: (IsInteger(mx) && Integer(mx) > 0) ? Integer(mx) : 0}       ; empty / 0 = no upper limit
+}
+
+; does a row pass every filter? skip = a column whose own value filter is left out (to list that column's values)
+CfRowPasses(st, f, skip := "") {
+    if (f.q != "") {
+        hit := false
+        for id, v in st["attr"] {
+            if InStr(v, f.q) {
+                hit := true
+                break
+            }
+        }
+        if !hit
+            return false
+    }
+    for id, v in Cf.colFilter {
+        if (id != skip && st["attr"].Get(id, "") != v)
+            return false
+    }
+    if (f.tsel > 1 && CfTypeOf(st) != Cf.typeNames[f.tsel])
+        return false
+    if (st["chars"] < f.minc)
+        return false
+    if (f.maxc > 0 && st["chars"] > f.maxc)
+        return false
+    return true
+}
+
+; Rebuild the value drop-down for the chosen column from the scanned data that the OTHER filters still let through,
+; and mark the columns that have a value filter in the column drop-down.
+CfBuildValues(f) {
+    ; column names, a * after those that are filtered
+    sel := Max(1, Cf.ddBy.Value)
+    names := ["Any column"]
+    for id in Cf.colIds {
+        for dim in CfDims {
+            if (dim[1] = id)
+                names.Push(dim[2] . (Cf.colFilter.Has(id) ? "  *" : ""))
+        }
+    }
+    changed := (SendMessage(0x146, 0, 0, Cf.ddBy.Hwnd) != names.Length)         ; CB_GETCOUNT
+    if !changed {
+        Loop names.Length {
+            if (CfComboText(Cf.ddBy, A_Index) != names[A_Index]) {
+                changed := true
+                break
+            }
+        }
+    }
+    if changed {
+        Cf.ddBy.Delete()
+        Cf.ddBy.Add(names)
+        Cf.ddBy.Choose(sel)
+    }
+    by := Cf.byIds[Max(1, Min(Cf.byIds.Length, sel))]
+    Cf.ddVal.Delete()
+    if (by = "any" || Cf.fonts.Count = 0) {
+        Cf.valKeys := []
+        Cf.ddVal.Add(["(pick a column first)"])
+        Cf.ddVal.Choose(1)
+        Cf.ddVal.Enabled := false
+    } else {
+        counts := Map()
+        counts.CaseSense := "Off"
+        for fk, st in Cf.fonts {
+            if CfRowPasses(st, f, by) {
+                v := st["attr"].Get(by, "")
+                counts[v] := counts.Get(v, 0) + 1
+            }
+        }
+        chosen := Cf.colFilter.Get(by, "")
+        if (chosen != "" && !counts.Has(chosen))
+            counts[chosen] := 0                         ; the chosen value stays in the list, even if other filters hide all its rows
+        vals := []
+        for v, n in counts
+            vals.Push(v)
+        Loop vals.Length - 1 {                          ; insertion sort (numbers by value, text A-Z)
+            i := A_Index + 1
+            x := vals[i]
+            j := i - 1
+            while (j >= 1 && CfValCmp(vals[j], x) > 0) {
+                vals[j + 1] := vals[j]
+                j -= 1
+            }
+            vals[j + 1] := x
+        }
+        Cf.valKeys := [""]
+        items := ["All values  (" . vals.Length . ")"]
+        pick := 1
+        for v in vals {
+            Cf.valKeys.Push(v)
+            items.Push(v . "   (" . counts[v] . (counts[v] = 1 ? " row)" : " rows)"))
+            if (chosen != "" && v = chosen)
+                pick := A_Index + 1
+        }
+        Cf.ddVal.Add(items)
+        Cf.ddVal.Choose(pick)
+        Cf.ddVal.Enabled := true
+    }
+    anyF := (f.q != "" || Cf.colFilter.Count > 0 || f.tsel > 1 || f.minc > 0 || f.maxc > 0)
+    Cf.btnClearF.Enabled := (Cf.fonts.Count > 0 && anyF)
+}
+
+CfComboText(ctl, i) {
+    n := SendMessage(0x149, i - 1, 0, ctl.Hwnd)         ; CB_GETLBTEXTLEN
+    if (n <= 0)
+        return ""
+    b := Buffer((n + 2) * 2, 0)
+    SendMessage(0x148, i - 1, b, ctl.Hwnd)              ; CB_GETLBTEXT
+    return StrGet(b, "UTF-16")
+}
+
+CfValCmp(a, b) {
+    if (IsNumber(a) && IsNumber(b))
+        return (Number(a) < Number(b)) ? -1 : ((Number(a) > Number(b)) ? 1 : 0)
+    return StrCompare(a, b, "Off")
+}
+
 ; Called after a scan: one conversion rule per row.
 CfFillList() {
     Cf.rules := Map()
     Cf.rules.CaseSense := "Off"
-    Cf.nRecall := 0
-    CfLoadRecall()
-    for fk, st in Cf.fonts {
-        rule := CfNewRule()
-        fn := st["attr"].Get("font", "")
-        if (Cf.kind != "txt" && fn != "" && Cf.recall.Has(fn)) {
-            r2 := CfUnpackRule(Cf.recall[fn])
-            if IsObject(r2) {
-                rule := r2
-                Cf.nRecall += 1
-            }
-        }
-        Cf.rules[st["key"]] := rule
-    }
-    if (Cf.nRecall > 0)
-        CfLog("Settings remembered from last time were set for " . Cf.nRecall . " row(s) (same font). Change them if needed.")
+    for fk, st in Cf.fonts                              ; every document starts fresh: nothing is kept from earlier ones
+        Cf.rules[st["key"]] := CfNewRule()
     Cf.curName := ""
     Cf.curRow := 0
     Cf.prevKey := ""
     CfBuildColumns()
+    Cf.colFilter := Map()
+    Cf.colFilter.CaseSense := "Off"
     Cf.edFind.Value := ""
     Cf.ddType.Choose(1)
     Cf.edMin.Value := "0"
@@ -2161,37 +2359,11 @@ CfFillList() {
 ; Rebuild the list from the current filter and sort settings.
 CfRefreshList(*) {
     keep := Cf.curName
-    q := Trim(Cf.edFind.Text)
-    by := Cf.byIds[Max(1, Min(Cf.byIds.Length, Cf.ddBy.Value))]
-    tsel := Max(1, Cf.ddType.Value)
-    mn := Trim(Cf.edMin.Text)
-    minc := IsInteger(mn) ? Integer(mn) : 0
-    mx := Trim(Cf.edMax.Text)
-    maxc := (IsInteger(mx) && Integer(mx) > 0) ? Integer(mx) : 0       ; empty / 0 = no upper limit
+    f := CfReadFilter()
     rows := []
     for fk, st in Cf.fonts {
-        if (q != "") {
-            hit := false
-            if (by = "any") {
-                for id, v in st["attr"] {
-                    if InStr(v, q) {
-                        hit := true
-                        break
-                    }
-                }
-            } else {
-                hit := InStr(st["attr"].Get(by, ""), q) > 0
-            }
-            if !hit
-                continue
-        }
-        if (tsel > 1 && CfTypeOf(st) != Cf.typeNames[tsel])
-            continue
-        if (st["chars"] < minc)
-            continue
-        if (maxc > 0 && st["chars"] > maxc)
-            continue
-        rows.Push(st)
+        if CfRowPasses(st, f)
+            rows.Push(st)
     }
     Loop rows.Length - 1 {                              ; insertion sort
         i := A_Index + 1
@@ -2229,6 +2401,7 @@ CfRefreshList(*) {
     Cf.lv.Opt("+Redraw")
     CfRepaint()
     Cf.lblCount.Text := (Cf.fonts.Count = 0) ? "" : rows.Length . " of " . Cf.fonts.Count . " shown"
+    CfBuildValues(f)
     CfSortArrows()
     if (rows.Length = 0) {
         Cf.curName := ""
@@ -2377,6 +2550,63 @@ CfToPptx(src, dst) {
     return CfLibreConvert(src, dst, "pptx")
 }
 
+; The format a result is saved in is the one the file was opened in (a .wps file can only be saved as .docx).
+CfOutExt(ext, newExt) {
+    return (ext = "wps") ? newExt : ext
+}
+
+; .docx -> .doc / .dot / .rtf / .odt again, through Microsoft Word, or LibreOffice when Word is not there.
+CfFromDocx(src, dst) {
+    SplitPath(dst, , , &ext)
+    ext := StrLower(ext)
+    codes := Map("doc", 0, "dot", 1, "rtf", 6, "odt", 23)       ; Word's SaveAs2 format numbers
+    w := ""
+    if codes.Has(ext) {
+        try {
+            w := ComObject("Word.Application")
+            w.Visible := false
+            w.DisplayAlerts := 0
+            doc := w.Documents.Open(src, false, true)
+            doc.SaveAs2(dst, codes[ext])
+            doc.Close(0)
+            w.Quit(0)
+            w := ""
+            if FileExist(dst)
+                return true
+        } catch {
+            if IsObject(w) {
+                try w.Quit(0)
+            }
+        }
+    }
+    return CfLibreConvert(src, dst, ext)
+}
+
+; .pptx -> .ppt / .pot / .pps / .odp again, through Microsoft PowerPoint, or LibreOffice when PowerPoint is not there.
+CfFromPptx(src, dst) {
+    SplitPath(dst, , , &ext)
+    ext := StrLower(ext)
+    codes := Map("ppt", 1, "pot", 5, "pps", 7, "odp", 50)       ; PowerPoint's SaveAs format numbers
+    p := ""
+    if codes.Has(ext) {
+        try {
+            p := ComObject("PowerPoint.Application")
+            pres := p.Presentations.Open(src, -1, 0, 0)
+            pres.SaveAs(dst, codes[ext])
+            pres.Close()
+            p.Quit()
+            p := ""
+            if FileExist(dst)
+                return true
+        } catch {
+            if IsObject(p) {
+                try p.Quit()
+            }
+        }
+    }
+    return CfLibreConvert(src, dst, ext)
+}
+
 ; LibreOffice (headless): converts src to the format fmt ("docx" / "pptx") and moves the result to dst.
 CfLibreConvert(src, dst, fmt) {
     SplitPath(src, , , , &nm)
@@ -2500,7 +2730,7 @@ CfPrepare(path) {
         }
         src := Cf.tmpDoc
         kind := isPpt ? "ppt" : "word"
-        outExt := newExt
+        outExt := CfOutExt(ext, newExt)
     }
     Cf.kind := kind
     Cf.outExt := outExt
@@ -2639,7 +2869,6 @@ CfConvertBatch() {
     }
     Cf.lastSaveDir := outDir
     CfSaveSettings()
-    CfRememberRules()
     secs := Round((A_TickCount - t0) / 1000, 1)
     CfLog("Batch finished: " . done . " of " . total . " file(s) converted in " . secs . " s" . (nFail > 0 ? ", " . nFail . " failed (see above)." : "."))
     Cf.sb.SetText("  Done. " . done . " of " . total . " file(s) converted in " . secs . " s.")
@@ -2676,7 +2905,7 @@ CfOpen(path) {
             }
             src := Cf.tmpDoc
             kind := isPpt ? "ppt" : "word"
-            outExt := newExt
+            outExt := CfOutExt(ext, newExt)
         }
         Cf.kind := kind
         Cf.outExt := outExt
@@ -2699,11 +2928,12 @@ CfOpen(path) {
         Cf.file := path
         Cf.queue := []
         CfUpdateFileLabel()
+        CfNewDocDefaults()                             ; a new document: all settings start fresh
         CfClearResults()                               ; nothing is scanned yet: the scan starts only with the Scan button
         Cf.edLog.Value := ""
         CfLog("Opened: " . path . "  (" . CfFmtSize(FileGetSize(path)) . ")")
         if (src != path)
-            CfLog("Converted to ." . outExt . " first (needed for ." . ext . " files). The result will be saved as ." . outExt . ".")
+            CfLog("Read through a temporary ." . (kind = "ppt" ? "pptx" : "docx") . " copy (needed for ." . ext . " files). The result will be saved as ." . outExt . (outExt = ext ? " again." : " (a ." . ext . " file cannot be written)."))
         if (kind = "txt")
             CfLog("Plain text, " . StrLen(Cf.txtText) . " character(s), read as " . Cf.txtEnc . ". No fonts in a text file: press Scan, then pick a conversion.")
         else
@@ -2786,7 +3016,7 @@ CfScan(*) {
         else
             CfLog("Scanned " . nparts . " part(s) in " . (A_TickCount - t0) . " ms. Looked at: " . names . ". " . Cf.fonts.Count . " different combination(s) found" . (Cf.queue.Length > 0 ? " in " . (Cf.queue.Length + 1) . " files" : "") . ".")
         CfProgressReset()
-        Cf.sb.SetText("  " . Cf.fonts.Count . " combination(s) found" . (Cf.nRecall > 0 ? " (" . Cf.nRecall . " set from last time)" : "") . ". Pick one or more (Ctrl / Shift + click) in the list and choose what to do with them.")
+        Cf.sb.SetText("  " . Cf.fonts.Count . " combination(s) found. Pick one or more (Ctrl / Shift + click) in the list and choose what to do with them.")
         CfSaveSettings()
     } catch as e {
         MsgBox(CfErrText(e), "Bangla Document Converter", 0x10)
@@ -2864,7 +3094,6 @@ CfConvert(*) {
         SplitPath(out, , &od)
         Cf.lastSaveDir := od
         CfSaveSettings()
-        CfRememberRules()
         CfLog("Converted " . (Cf.kind = "txt" ? Cf.nChars . " character(s)" : Cf.nRuns . " run(s), " . Cf.nChars . " character(s)") . " in " . Round((t2 - t0) / 1000, 1) . " s.")
         Cf.sb.SetText("  Done. Converted in " . Round((t2 - t0) / 1000, 1) . " s.")
         CfBusy(false)
@@ -2899,13 +3128,33 @@ CfConvertDoc(out) {
             todo.Push(dst)
         }
         Cf.paraSeq := 0
+        CfLog("Convert: " . todo.Length . " part(s) hold text that has a conversion set (of " . CfParts(Cf.work).Length . " read).")
+        for tp in todo
+            CfLog("   part: " . CfPartName(tp))
+        if (todo.Length = 0)
+            throw Error("None of the document parts matched the rows you set up, so nothing could be converted.`nScan again, choose an action (and a font) for the rows, then press Convert.`nThe Log tab lists what was found.")
         CfRunParts(todo, true, 4, 90)
+        CfLog("Convert: " . Cf.nRuns . " run(s) changed.")
+        if (Cf.nRuns = 0)
+            throw Error("The document was read, but no text run was changed, so no file was saved.`nThe chosen rows probably do not match the text (for example ANSI to Unicode on Bangla Unicode text, or the reverse).`nCheck the action of each row, then try again.")
         CfProgress(92, "Saving")
         src := Cf.file
         if (Cf.tmpDoc != "")
             src := Cf.tmpDoc                            ; a .doc / .odt / .ppt ... file was converted first
-        if !(CfRunPS(Cf.psZip, src, w2, out) && FileExist(out))
+        SplitPath(src, , , &srcExt)
+        SplitPath(out, , , &outExt)
+        if (Cf.tmpDoc != "" && StrLower(outExt) != StrLower(srcExt)) {      ; opened as .doc / .odt / .ppt ...: pack as .docx / .pptx, then save in the original format
+            pk := A_Temp . "\BFC_pk_" . A_TickCount . "." . srcExt
+            if !(CfRunPS(Cf.psZip, src, w2, pk) && FileExist(pk))
+                throw Error("Could not write the output file.")
+            CfProgress(96, "Saving as ." . outExt)
+            ok := (StrLower(srcExt) = "pptx") ? CfFromPptx(pk, out) : CfFromDocx(pk, out)
+            try FileDelete(pk)
+            if !(ok && FileExist(out))
+                throw Error("Could not save as ." . outExt . ". Microsoft " . (StrLower(srcExt) = "pptx" ? "PowerPoint" : "Word") . " (or LibreOffice) is needed to write that format.")
+        } else if !(CfRunPS(Cf.psZip, src, w2, out) && FileExist(out)) {
             throw Error("Could not write the output file.")
+        }
         CfProgress(100, "Done")
     } finally {
         try DirDelete(w2, true)
@@ -3021,9 +3270,7 @@ CfLayoutRight(partial := false) {
         y += Round(119 * d)
         Cf.sepS.Move(px, y - Round(6 * d), pw, 2)
 
-        bwA := Round(128 * d)
-        Cf.hdAct.Move(px, y, pw - bwA - gap, lh)
-        Cf.btnApplyAll.Move(px + pw - bwA, y - Round(3 * d), bwA, Round(23 * d))
+        Cf.hdAct.Move(px, y, pw, lh)
         Cf.ddAct.Move(px, y + Round(20 * d), pw)
         y += Round(54 * d)
         Cf.sep1.Move(px, y - Round(6 * d), pw, 2)
@@ -3046,14 +3293,16 @@ CfLayoutRight(partial := false) {
         wSzEd := Round(56 * d)
         Cf.hdSize.Move(px, y, pw, lh)
         Cf.ddSize.Move(px, y + Round(20 * d), wSzDd)
-        Cf.edSize.Move(px + wSzDd + gap, y + Round(20 * d), wSzEd, eh)
-        Cf.lbl5.Move(px + wSzDd + gap + wSzEd + gap, y + Round(24 * d), Round(30 * d), lh)
+        Cf.edSize.Move(px + wSzDd + gap, y + Round(20 * d), pw - wSzDd - gap, eh)      ; the number box takes all the free width
         y += Round(58 * d)
         Cf.sep4.Move(px, y - Round(6 * d), pw, 2)
 
         ; (the preview text size buttons now live in the filter area on the left)
 
-        Cf.btnConv.Move(px, y + Round(2 * d), pw, Round(34 * d))
+        ; Apply to selected | Apply to all: 50 % each, right above Convert
+        Cf.btnApplySel.Move(px, y + Round(2 * d), half, bh)
+        Cf.btnApplyAll.Move(px + half + gap, y + Round(2 * d), pw - half - gap, bh)
+        Cf.btnConv.Move(px, y + Round(2 * d) + bh + gap, pw, Round(34 * d))
     } finally {
         if partial {
             SendMessage(0x000B, 1, 0, Cf.gui.Hwnd)       ; WM_SETREDRAW on
@@ -3106,7 +3355,8 @@ CfLayout(redraw := true) {
     wType := Round(120 * d)
     wMinL := Round(62 * d)
     wMin := Round(52 * d)
-    wFind := Max(Round(70 * d), lw - (wBy + wType + 2 * gap))
+    wVal := Round(150 * d)
+    wFind := Max(Round(70 * d), lw - (wBy + wVal + wType + 3 * gap))
     Cf.edFind.Move(m, y2, wFind, bh)
     dh := 0
     Cf.ddBy.GetPos(, , , &dh)
@@ -3114,16 +3364,36 @@ CfLayout(redraw := true) {
     x := m + wFind + gap
     Cf.ddBy.Move(x, yd, wBy)
     x += wBy + gap
+    Cf.ddVal.Move(x, yd, wVal)                     ; value list of the chosen column, right next to it
+    x += wVal + gap
     Cf.ddType.Move(x, yd, wType)
     y3 := y2 + bh + gapS
+
+    ; ---- left: list, splitter, tabs ----
+    spH := Round(6 * d)
+    minLv := Round(90 * d)
+    minTab := Round(110 * d)
+    lvTop := y3
+    avail := h - sbh - gap - lvTop
+    tbH := eh + 2 * gapS                               ; the filter / preview toolbar sits under the list
+    if !Cf.tabUser                                     ; until the splitter is dragged: Log / Preview = 40 %, list + toolbar = 60 %
+        Cf.tabH := Round(avail * 0.40)
+    tabH := Min(Max(Cf.tabH, minTab), Max(minTab, avail - spH - tbH - minLv))
+    lvH := avail - spH - tbH - tabH
+    Cf.lv.Move(m, lvTop, lw, lvH)
+    yT := lvTop + lvH + gapS
     x := m
-    Cf.lblMin.Move(x, y3 + Round(4 * d), wMinL, lh)
+    Cf.lblMin.Move(x, yT + Round(4 * d), wMinL, lh)
     x += wMinL
-    Cf.edMin.Move(x, y3, wMin, eh)
+    Cf.edMin.Move(x, yT, wMin, eh)
     x += wMin + gap
-    Cf.lblMax.Move(x, y3 + Round(4 * d), wMinL, lh)
+    Cf.lblMax.Move(x, yT + Round(4 * d), wMinL, lh)
     x += wMinL
-    Cf.edMax.Move(x, y3, wMin, eh)
+    Cf.edMax.Move(x, yT, wMin, eh)
+    x += wMin + gap
+    wClr := Round(100 * d)
+    Cf.btnClearF.Move(x, yT, wClr, eh)
+    x += wClr - wMin                               ; keep the preview-size "never over" check below working
 
     ; preview text size, right-aligned on the Min / Max line:  Preview size:  [A-] [A+]  21 pt  [Reset]
     gp := Round(2 * d)                             ; tight spacing between the preview controls
@@ -3132,30 +3402,19 @@ CfLayout(redraw := true) {
     wPv := Round(42 * d)
     wPr := Round(52 * d)
     xp := m + lw - (wPl + 2 * wPb + wPv + wPr + 3 * gp)
-    xp := Max(xp, x + wMin + gap)                  ; never over the Max box
-    Cf.hdPrev.Move(xp, y3 + Round(4 * d), wPl, lh)
+    xp := Max(xp, x + wMin + gap)                  ; never over the Max box / Clear filters button
+    Cf.hdPrev.Move(xp, yT + Round(4 * d), wPl, lh)
     xp += wPl
-    Cf.btnPrevDn.Move(xp, y3, wPb, eh)
+    Cf.btnPrevDn.Move(xp, yT, wPb, eh)
     xp += wPb + gp
-    Cf.btnPrevUp.Move(xp, y3, wPb, eh)
+    Cf.btnPrevUp.Move(xp, yT, wPb, eh)
     xp += wPb + gp
-    Cf.lblPrevSz.Move(xp, y3 + Round(4 * d), wPv, lh)
+    Cf.lblPrevSz.Move(xp, yT + Round(4 * d), wPv, lh)
     xp += wPv + gp
-    Cf.btnPrevReset.Move(xp, y3, wPr, eh)
+    Cf.btnPrevReset.Move(xp, yT, wPr, eh)
 
-    ; ---- left: list, splitter, tabs ----
-    spH := Round(6 * d)
-    minLv := Round(90 * d)
-    minTab := Round(110 * d)
-    lvTop := y3 + eh + gapS
-    avail := h - sbh - gap - lvTop
-    if !Cf.tabUser                                     ; until the splitter is dragged: Log / Preview = 30 %, list = 70 %
-        Cf.tabH := Round(avail * 0.30)
-    tabH := Min(Max(Cf.tabH, minTab), Max(minTab, avail - spH - minLv))
-    lvH := avail - spH - tabH
-    Cf.lv.Move(m, lvTop, lw, lvH)
-    Cf.split.Move(m, lvTop + lvH, lw, spH)
-    yTab := lvTop + lvH + spH
+    Cf.split.Move(m, lvTop + lvH + tbH, lw, spH)
+    yTab := lvTop + lvH + tbH + spH
     Cf.tab.Move(m, yTab, lw, tabH)
     CfFitTabs()
 
@@ -3250,27 +3509,20 @@ CfIni(sec, key, def := "") {
 }
 
 CfLoadSettings() {
-    n := CfIni("Preview", "Size")
-    if IsInteger(n)
-        Cf.prevSize := Min(48, Max(6, Integer(n)))
     w := CfIni("Window", "W2")
     h := CfIni("Window", "H2")
     if (IsInteger(w) && IsInteger(h)) {
         Cf.winW := Min(A_ScreenWidth, Max(820, Integer(w)))
-        Cf.winH := Min(A_ScreenHeight, Max(575, Integer(h)))
+        Cf.winH := Min(A_ScreenHeight, Max(570, Integer(h)))
     }
     for dim in CfDims
-        Cf.scanOpt[dim[1]] := (CfIni("Scan", dim[1], (dim[1] = "font" || dim[1] = "size") ? "1" : "0") = "1")
+        Cf.scanOpt[dim[1]] := (dim[1] = "font" || dim[1] = "size")      ; always the same start: Font and Size
+    try IniDelete(CfSettingsFile(), "Scan")                ; older builds kept these: not any more
+    try IniDelete(CfSettingsFile(), "Preview")
     Cf.lastOpenDir := CfIni("Folders", "LastOpen")
     Cf.lastSaveDir := CfIni("Folders", "LastSave")
-    nm := CfIni("Encoding", "From")
-    nm2 := CfIni("Encoding", "To")
-    for i, v in Cf.mapNames {
-        if (nm != "" && v = nm)
-            Cf.defMap := i
-        if (nm2 != "" && v = nm2)
-            Cf.defMap2 := i
-    }
+    try IniDelete(CfSettingsFile(), "FontRules")        ; plans and encodings of earlier documents are not kept
+    try IniDelete(CfSettingsFile(), "Encoding")
 }
 
 CfSaveSettings(*) {
@@ -3280,15 +3532,8 @@ CfSaveSettings(*) {
         DirCreate(d)
         if !FileExist(f)
             FileOpen(f, "w", "UTF-16").Close()            ; UTF-16 with BOM, so folder names with any letters are kept
-        IniWrite(Cf.prevSize, f, "Preview", "Size")
-        for dim in CfDims
-            IniWrite((Cf.cbScan.Has(dim[1]) ? Cf.cbScan[dim[1]].Value : (Cf.scanOpt.Get(dim[1], 0) ? 1 : 0)), f, "Scan", dim[1])
         IniWrite(Cf.lastOpenDir, f, "Folders", "LastOpen")
         IniWrite(Cf.lastSaveDir, f, "Folders", "LastSave")
-        if (Cf.defMap >= 1 && Cf.defMap <= Cf.mapNames.Length)
-            IniWrite(Cf.mapNames[Cf.defMap], f, "Encoding", "From")
-        if (Cf.defMap2 >= 1 && Cf.defMap2 <= Cf.mapNames.Length)
-            IniWrite(Cf.mapNames[Cf.defMap2], f, "Encoding", "To")
         if (IsObject(Cf.gui) && WinGetMinMax(Cf.gui.Hwnd) = 0) {
             Cf.gui.GetClientPos(, , &w, &h)
             IniWrite(w, f, "Window", "W2")
@@ -3322,12 +3567,11 @@ CfHelpText() {
     t .= "In PowerPoint, a value the text takes from its slide or master is shown as (inherited).`r`n"
     t .= "`r`n`r`nSELECTING AND COPYING SETTINGS`r`n"
     t .= "`r`nRight-click the list: Select all, Invert selection, Select all rows with the same font / size / style / plan, Copy settings of this row, Paste settings to the selected rows, and Reset the selected rows to Keep as is.`r`n"
-    t .= "The Apply to all shown button (next to Action) copies the settings now shown to every row the list shows, so filter first (for example type a font name) and apply.`r`n"
-    t .= "After a conversion the plan of each font is remembered: the next time the same font is scanned, its plan is set again for you.`r`n"
+    t .= "The Apply to all button (next to Action) copies the settings now shown to every row the list shows, so filter first (for example type a font name) and apply.`r`n"
     t .= "`r`n`r`nSEVERAL FILES AT ONCE`r`n"
     t .= "`r`nOpen or drop several files (all Word / PowerPoint, or all .txt). The first one is shown; Scan reads all of them and puts every combination in the list. Set the plan once, press Convert and choose a folder: every file is saved there as name_converted (an existing file is never overwritten). A file that cannot be read is skipped and noted in the Log.`r`n"
     t .= "`r`nFILTER`r`n"
-    t .= "`r`nType in the first box to filter the list, and choose in which column to look (the boxes follow your scan options). Type filters Bangla Unicode / ANSI text, and Min / Max chars limit by amount of text.`r`n"
+    t .= "`r`nType in the first box to filter the list, and choose in which column to look (the boxes follow your scan options). Choosing a column opens a second box with every value found in that column (taken from the scanned data that the other filters still show). Pick a value and the list shows only the rows with that value, with all their columns. Filters on different columns work together, a * marks a filtered column, and Clear filters removes them all. Type filters Bangla Unicode / ANSI text, and Min / Max chars limit by amount of text.`r`n"
     t .= "`r`n`r`nSUPPORTED FILE TYPES`r`n"
     t .= "`r`nWord (read and saved in the same format)`r`n"
     t .= "   .docx  .docm  .dotx  .dotm`r`n"
@@ -3347,14 +3591,14 @@ CfHelpText() {
     t .= "PowerPoint: slides (text, tables, shapes, groups), speaker notes, SmartArt, chart text, slide masters and layouts.`r`n"
     t .= "`r`n`r`nSETTINGS`r`n"
     t .= "`r`nSaved automatically in:`r`n   " . CfSettingsFile() . "`r`n"
-    t .= "It remembers the preview text size, the window size, the last folders, the last encodings, the scan options you ticked and the plan used for each font.`r`n"
+    t .= "Only the window size and the last folders are remembered. Nothing about a document is kept: every newly opened document starts fresh (Font and Size ticked, Keep as is, no filters, normal preview size), and you set it up as you need.`r`n"
     return t
 }
 
 CfStart() {
     Cf.mapFiles := CfFindMaps()
     if (Cf.mapFiles.Length = 0) {
-        MsgBox("No mapping file found.`nPut the mapping files (.txt or .zxn) in the Encodings folder.", "Bangla Document Converter", 0x10)
+        MsgBox("No mapping file found.`nPut the mapping files (.txt or .een) in the Encodings folder.", "Bangla Document Converter", 0x10)
         ExitApp()
     }
     for f in Cf.mapFiles {
@@ -3369,7 +3613,7 @@ CfStart() {
     fontList := CfFontNames()
 
     d0 := A_ScreenDPI / 96
-    g := Gui("+Resize +0x2000000 +MinSize" . Round(800 * d0) . "x" . Round(575 * d0), "Bangla Document Converter")      ; minimum height 575
+    g := Gui("+Resize +0x2000000 +MinSize" . Round(800 * d0) . "x" . Round(570 * d0), "Bangla Document Converter")      ; minimum height 570
     Cf.gui := g
     g.SetFont("s9", "Segoe UI")
 
@@ -3403,6 +3647,8 @@ CfStart() {
     Cf.edMax := g.Add("Edit", "x518 y42 w52 h24 Number", "")
     CfSetCue(Cf.edMax, "no limit")
     Cf.lblCount := g.Add("Text", "x540 y46 w110 Right", "")
+    Cf.ddVal := g.Add("DropDownList", "x10 y96 w300 Disabled Choose1", ["(pick a column first)"])
+    Cf.btnClearF := g.Add("Button", "x320 y96 w100 h24 Disabled", "Clear filters")
     Cf.lv := g.Add("ListView", "x10 y72 w640 h200 +Multi NoSort Grid", ["Font", "Size", "Type", "Runs", "Characters", "Plan"])
     CfBuildColumns()                                      ; the columns follow the ticked scan options
     CfSortArrows()                                        ; show the default sort (Characters, biggest first)
@@ -3424,7 +3670,8 @@ CfStart() {
 
     ; right side: properties panel (plain labels and lines, no group boxes)
     Cf.hdAct := g.Add("Text", "x700 y10 w120", "Action")
-    Cf.btnApplyAll := g.Add("Button", "x830 y8 w120 h23 Disabled", "Apply to all shown")
+    Cf.btnApplySel := g.Add("Button", "x700 y422 w120 h26 Disabled", "Apply to selected")
+    Cf.btnApplyAll := g.Add("Button", "x830 y422 w120 h26 Disabled", "Apply to all")
     Cf.ddAct := g.Add("DropDownList", "x700 y32 w250 Choose1", ["Keep as is", "ANSI to Unicode", "Unicode to ANSI", "ANSI to ANSI", "Change font / size only"])
     Cf.sep1 := g.Add("Text", "x700 y62 w250 h2 0x10")
     Cf.hdEnc := g.Add("Text", "x700 y68 w250", "Encoding")
@@ -3439,7 +3686,6 @@ CfStart() {
     Cf.hdSize := g.Add("Text", "x700 y256 w250", "Size")
     Cf.ddSize := g.Add("DropDownList", "x700 y278 w150 Choose1", ["Keep size", "Change by (points)", "Set to (points)"])
     Cf.edSize := g.Add("Edit", "x856 y278 w56 h24", "0")
-    Cf.lbl5 := g.Add("Text", "x918 y282 w30", "pt")
     Cf.sep4 := g.Add("Text", "x700 y350 w250 h2 0x10")
     Cf.hdPrev := g.Add("Text", "x700 y356 w84", "Preview size:")
     Cf.btnPrevDn := g.Add("Button", "x700 y378 w34 h24", "A-")
@@ -3458,13 +3704,14 @@ CfStart() {
     Cf.btnOpen.OnEvent("Click", CfOpenDialog)
     Cf.btnRemove.OnEvent("Click", CfRemove)
     Cf.btnApplyAll.OnEvent("Click", (*) => CfApplyAllShown(Cf.curName))
+    Cf.btnApplySel.OnEvent("Click", CfApplySelected)
     Cf.lv.OnEvent("ContextMenu", CfListMenu)
     SetTimer(CfTipTick, 300)                            ; hover tips (they also work on disabled controls)
     Cf.btnConv.OnEvent("Click", CfConvert)
     Cf.btnScan.OnEvent("Click", CfScan)
     Cf.btnScanAll.OnEvent("Click", CfScanAll)
     Cf.btnScanNone.OnEvent("Click", CfScanNone)
-    Cf.ddBy.OnEvent("Change", CfRefreshList)
+    Cf.ddBy.OnEvent("Change", CfByChanged)
     Cf.btnPrevDn.OnEvent("Click", (*) => CfPrevStep(-1))
     Cf.btnPrevUp.OnEvent("Click", (*) => CfPrevStep(1))
     Cf.btnPrevReset.OnEvent("Click", (*) => CfPrevStep(0))
@@ -3475,6 +3722,8 @@ CfStart() {
     Cf.edMin.OnEvent("Change", CfFilterDelayed)
     Cf.edMax.OnEvent("Change", CfFilterDelayed)
     Cf.ddType.OnEvent("Change", CfRefreshList)
+    Cf.ddVal.OnEvent("Change", CfValChanged)
+    Cf.btnClearF.OnEvent("Click", CfClearFilters)
     Cf.ddAct.OnEvent("Change", CfUIChanged)
     Cf.ddMap.OnEvent("Change", CfUIChanged)
     Cf.ddMap2.OnEvent("Change", CfUIChanged)
@@ -3490,7 +3739,27 @@ CfStart() {
     OnExit(CfCleanup)
     OnExit(CfSaveSettings)
     CfEnableUI(-1)
-    g.Show("w" . Cf.winW . " h" . Max(575, Min(Cf.winH, A_ScreenHeight - 120)))
+    g.Show("w" . Cf.winW . " h" . Max(570, Min(Cf.winH, A_ScreenHeight - 120)))
 }
 
 CfStart()
+
+; Ctrl+A = Select All: the text in a text box, otherwise every row of the list
+#HotIf IsObject(Cf.gui) && WinActive("ahk_id " . Cf.gui.Hwnd)
+^a:: {
+    c := ""
+    try c := Cf.gui.FocusedCtrl
+    if IsObject(c) {
+        if (c.Type = "Edit") {
+            SendMessage(0x00B1, 0, -1, c.Hwnd)              ; EM_SETSEL
+            return
+        }
+        if (c.Type = "ComboBox") {
+            SendMessage(0x0142, 0, 0xFFFF0000, c.Hwnd)      ; CB_SETEDITSEL
+            return
+        }
+    }
+    if (Cf.rowKeys.Length > 0 && !Cf.busySel)
+        CfSelAll()
+}
+#HotIf
