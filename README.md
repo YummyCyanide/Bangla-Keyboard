@@ -85,13 +85,6 @@ Open them from the tray menu, or assign them to the bar's extra buttons (**Setti
 - A Bangla font of your choice. Unicode layouts work with fonts like *Nirmala UI* (built into Windows). ANSI layouts (Bijoy Classic) need a matching ANSI font such as SutonnyMJ, which you must obtain yourself.
 - Microsoft Office / WPS / LibreOffice is only needed for the automatic-font feature and for converting `.doc`, `.ppt` and similar older formats.
 
-### System requirements for Pupo Encrypter
-
-- Windows 10 or 11 (Windows 7 or later also works with AutoHotkey v2).
-- [AutoHotkey v2](https://www.autohotkey.com/) to run `Pupo Encrypter.ahk` from source. A compiled exe needs nothing installed.
-- A screen of at least 800 x 600; the window is resizable.
-- Almost no resources: a few MB of memory and no extra disk space beyond the files you convert. No internet, no Office and no administrator rights.
-
 ---
 
 ## How to Use
